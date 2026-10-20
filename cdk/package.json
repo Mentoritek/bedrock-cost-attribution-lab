@@ -1,0 +1,25 @@
+{
+  "name": "bedrock-cost-attribution-lab-cdk",
+  "version": "0.1.0",
+  "private": true,
+  "license": "MIT",
+  "scripts": {
+    "build": "tsc",
+    "test": "jest",
+    "cdk": "cdk"
+  },
+  "devDependencies": {
+    "@swc/core": "1.16.18",
+    "@swc/jest": "0.2.39",
+    "@types/jest": "30.0.0",
+    "@types/node": "24.19.2",
+    "aws-cdk": "2.1146.0",
+    "jest": "30.5.2",
+    "tsx": "4.23.15",
+    "typescript": "7.0.2"
+  },
+  "dependencies": {
+    "aws-cdk-lib": "2.274.0",
+    "constructs": "10.8.1"
+  }
+}
