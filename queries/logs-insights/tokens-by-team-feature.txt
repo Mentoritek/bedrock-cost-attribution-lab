@@ -1,0 +1,6 @@
+fields requestMetadata.team as team, requestMetadata.feature as feature, modelId,
+       input.inputTokenCount as inTokens, output.outputTokenCount as outTokens
+| filter requestMetadata.lab = "mt-01"
+| stats sum(inTokens) as totalInput, sum(outTokens) as totalOutput, count() as calls
+        by team, feature, modelId
+| sort totalInput desc
