@@ -1,0 +1,15 @@
+node_modules/
+cdk/cdk.out/
+cdk.context.json
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+runs/*
+!runs/.gitkeep
+results/*
+!results/.gitkeep
+*.parquet
+.env
+.DS_Store

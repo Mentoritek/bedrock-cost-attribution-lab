@@ -1,0 +1,51 @@
+{
+  "region": "us-east-1",
+  "stackNames": { "lab": "BedrockCostLab", "curExport": "BedrockCostLabCurExport" },
+  "projectTag": { "key": "project", "value": "mt-01-bedrock-cost-lab" },
+  "model": { "foundationModelId": "openai.gpt-oss-20b-1:0", "maxTokens": 256 },
+  "pricing": {
+    "inputPer1M": null, "outputPer1M": null,
+    "source": "https://aws.amazon.com/bedrock/pricing/", "readOn": null,
+    "note": "Ken enters the us-east-1 Standard-tier rates for gpt-oss-20b from the pricing page on test day, with the date. verify.py t4 refuses to run while null."
+  },
+  "tagKeys": { "team": "team", "path": "path", "user": "user", "app": "app" },
+  "teams": [
+    { "name": "search",    "weight": 0.70, "features": ["query-rewrite", "result-summary"] },
+    { "name": "support",   "weight": 0.20, "features": ["ticket-triage", "reply-draft"] },
+    { "name": "analytics", "weight": 0.10, "features": ["report-narrative"] }
+  ],
+  "roles": {
+    "teamRolePrefix": "BedrockLab-Team-",
+    "directPathTag": "direct",
+    "gatewayRoleName": "BedrockLab-Gateway",
+    "loggingRoleName": "BedrockLab-InvocationLogging",
+    "chatCompletionsTeam": "support"
+  },
+  "gateway": {
+    "roleTag": { "team": "gateway", "path": "gateway" },
+    "sharedSessionName": "llm-gateway",
+    "users": [
+      { "user": "alice@example.com", "session": "alice", "team": "search" },
+      { "user": "bob@example.com",   "session": "bob",   "team": "search" },
+      { "user": "carol@example.com", "session": "carol", "team": "support" },
+      { "user": "dan@example.com",   "session": "dan",   "team": "analytics" }
+    ]
+  },
+  "profile": {
+    "name": "bedrock-lab-support-assistant",
+    "description": "MT-01 sample app profile",
+    "appTag": "support-assistant",
+    "routeFeature": "reply-draft"
+  },
+  "traffic": {
+    "callsPerRun": 600, "seed": 1901, "pauseSeconds": 0.2, "maxAttempts": 6,
+    "label": "SAMPLE DATA — MT-01 lab", "metadataLab": "mt-01"
+  },
+  "budget": {
+    "name": "bedrock-cost-lab-monthly", "limitUsd": 25, "email": "",
+    "actualThresholdPercent": 80, "forecastThresholdPercent": 100
+  },
+  "logGroupName": "/mentoritek/bedrock-cost-lab/invocations",
+  "logging": { "retentionDays": 30, "customResourceId": "bedrock-lab-invocation-logging" },
+  "curExport": { "name": "bedrock-cost-lab-cur2", "s3Prefix": "cur2", "timeGranularity": "HOURLY" }
+}
