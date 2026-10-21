@@ -46,7 +46,7 @@ Every name, tag, team, weight, model, price and email lives in [`config/lab.conf
   - *Standalone*, because cost allocation tags are managed at the payer account level, so a member account of an AWS Organization can't activate them. `scripts/preflight.py` checks this and stops on a member account.
   - *Paid plan*, because a Free-plan account is upgraded automatically if it joins an Organization, and its Free Tier credits then expire. The Paid plan also has every service and feature an enterprise account has.
 - **Region `us-east-1`.** The Data Exports bucket policy names `arn:aws:bcm-data-exports:us-east-1:…`, and gpt-oss-20b is offered in-Region in us-east-1.
-- **AWS CLI v2** with a profile that can administer the account.
+- **AWS CLI v2** with a profile that can administer the account. `requirements.txt` includes the botocore CRT extra, so profiles that sign in with `aws login` work; other credential types need nothing extra.
 - **Node.js LTS** (see [`.nvmrc`](.nvmrc); `nvm use`) and npm.
 - **Python 3.12+.**
 - **Bedrock access to `openai.gpt-oss-20b-1:0`.** If `python -m traffic smoke` returns `AccessDeniedException`, open the model's page in the Bedrock console's model catalog / model access page and accept its terms, then retry.

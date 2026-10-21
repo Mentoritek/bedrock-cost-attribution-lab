@@ -1,3 +1,5 @@
 boto3==1.43.116
+# CRT extra: needed by the login credential provider (profiles that sign in with `aws login`).
+botocore[crt]==1.43.116
 pandas==3.0.6
 pyarrow==26.0.0
