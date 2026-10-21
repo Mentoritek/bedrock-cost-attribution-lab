@@ -20,7 +20,8 @@ MODES = ("direct", "gateway-shared", "gateway-per-user")
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m traffic", description="MT-01 Bedrock lab traffic generator")
     parser.add_argument("--profile", help="AWS CLI profile (default: standard credential chain)")
-    parser.add_argument("--config", help="path to lab.config.json (default: config/lab.config.json or $LAB_CONFIG)")
+    parser.add_argument("--config", help="config file (default: $LAB_CONFIG, else config/lab.config.local.json "
+                        "if present, else config/lab.config.json)")
     parser.add_argument("--show-ids", action="store_true", help="do not mask 12-digit account IDs")
     sub = parser.add_subparsers(dest="command", required=True)
 

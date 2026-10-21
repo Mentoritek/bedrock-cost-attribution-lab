@@ -13,3 +13,4 @@ results/*
 *.parquet
 .env
 .DS_Store
+config/lab.config.local.json

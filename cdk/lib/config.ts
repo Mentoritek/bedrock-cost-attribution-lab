@@ -64,11 +64,17 @@ export interface LabConfig {
 }
 
 export const DEFAULT_CONFIG_PATH = path.resolve(__dirname, '..', '..', 'config', 'lab.config.json');
+/** Git-ignored copy with your own email and prices; used instead of the default when it exists. */
+export const LOCAL_CONFIG_PATH = path.resolve(__dirname, '..', '..', 'config', 'lab.config.local.json');
 
-/** `-c configPath=...` wins, then $LAB_CONFIG, then config/lab.config.json. */
-export function resolveConfigPath(contextPath?: string): string {
+/**
+ * `-c configPath=...` wins, then $LAB_CONFIG, then config/lab.config.local.json if it exists,
+ * then config/lab.config.json.
+ */
+export function resolveConfigPath(contextPath?: string, localPath: string = LOCAL_CONFIG_PATH): string {
   const chosen = contextPath ?? process.env.LAB_CONFIG;
-  return chosen ? path.resolve(chosen) : DEFAULT_CONFIG_PATH;
+  if (chosen) return path.resolve(chosen);
+  return fs.existsSync(localPath) ? localPath : DEFAULT_CONFIG_PATH;
 }
 
 export function loadConfig(file: string = DEFAULT_CONFIG_PATH): LabConfig {

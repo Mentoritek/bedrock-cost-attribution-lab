@@ -2,7 +2,10 @@ import * as cdk from 'aws-cdk-lib/core';
 import { Match, Template } from 'aws-cdk-lib/assertions';
 import { AttributionLabStack } from '../lib/attribution-lab-stack';
 import { CurExportStack } from '../lib/cur-export-stack';
-import { foundationModelArn, LabConfig, loadConfig } from '../lib/config';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import { DEFAULT_CONFIG_PATH, foundationModelArn, LabConfig, loadConfig, resolveConfigPath } from '../lib/config';
 
 // Fake account for synth only — never a real one.
 const ACCOUNT = '111111111111';
@@ -211,5 +214,25 @@ describe('CurExportStack', () => {
       },
     });
     cur.hasOutput('ExportArn', {});
+  });
+});
+
+describe('config file resolution', () => {
+  const saved = process.env.LAB_CONFIG;
+  afterEach(() => {
+    if (saved === undefined) delete process.env.LAB_CONFIG;
+    else process.env.LAB_CONFIG = saved;
+  });
+
+  test('context path, then LAB_CONFIG, then lab.config.local.json if present, then lab.config.json', () => {
+    delete process.env.LAB_CONFIG;
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'labcfg-'));
+    const local = path.join(dir, 'lab.config.local.json');
+    expect(resolveConfigPath(undefined, local)).toBe(DEFAULT_CONFIG_PATH);
+    fs.writeFileSync(local, '{}');
+    expect(resolveConfigPath(undefined, local)).toBe(local);
+    process.env.LAB_CONFIG = path.join(dir, 'env.json');
+    expect(resolveConfigPath(undefined, local)).toBe(path.join(dir, 'env.json'));
+    expect(resolveConfigPath(path.join(dir, 'ctx.json'), local)).toBe(path.join(dir, 'ctx.json'));
   });
 });

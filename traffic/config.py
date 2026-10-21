@@ -9,16 +9,21 @@ from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CONFIG_PATH = REPO_ROOT / "config" / "lab.config.json"
+# Git-ignored copy with your own email and prices; used instead of the default when it exists.
+LOCAL_CONFIG_PATH = REPO_ROOT / "config" / "lab.config.local.json"
 
 
 class ConfigError(ValueError):
     pass
 
 
-def config_path(override: str | None = None) -> Path:
-    """--config wins, then the LAB_CONFIG environment variable, then the repo default."""
+def config_path(override: str | None = None, local: Path | None = None) -> Path:
+    """--config wins, then $LAB_CONFIG, then config/lab.config.local.json if it exists, then the repo default."""
     chosen = override or os.environ.get("LAB_CONFIG")
-    return Path(chosen).resolve() if chosen else DEFAULT_CONFIG_PATH
+    if chosen:
+        return Path(chosen).resolve()
+    local = local or LOCAL_CONFIG_PATH
+    return local if local.exists() else DEFAULT_CONFIG_PATH
 
 
 def load_config(path: str | Path | None = None) -> dict[str, Any]:

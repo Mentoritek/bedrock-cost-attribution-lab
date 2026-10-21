@@ -10,14 +10,14 @@ import verify
 from botocore.session import get_session
 from botocore.validate import validate_parameters
 
-from traffic.config import REPO_ROOT, load_config
+from traffic.config import DEFAULT_CONFIG_PATH, REPO_ROOT, load_config
 
 QUERIES = REPO_ROOT / "queries" / "logs-insights"
 
 
 @pytest.fixture
 def cfg():
-    return load_config()
+    return load_config(DEFAULT_CONFIG_PATH)  # committed file, never the local override
 
 
 def input_shape(service, op):

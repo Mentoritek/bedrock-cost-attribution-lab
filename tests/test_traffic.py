@@ -4,12 +4,13 @@ import copy
 import os
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 from botocore.credentials import Credentials
 
 from traffic.chat_completions_check import SIGNING_SERVICE, build_signed_request, endpoint_url
-from traffic.config import REPO_ROOT, ConfigError, load_config, validate
+from traffic.config import DEFAULT_CONFIG_PATH, REPO_ROOT, ConfigError, config_path, load_config, validate
 from traffic.invoke import check_metadata, converse_with_backoff, request_metadata
 from traffic.redact import MASK, redact
 from traffic.schedule import assign_users, build_plan, feature_counts, plan_table, team_counts
@@ -19,7 +20,20 @@ FAKE_ACCOUNT = "111111111111"
 
 @pytest.fixture
 def cfg():
-    return load_config()
+    return load_config(DEFAULT_CONFIG_PATH)  # committed file, never the local override
+
+
+# ---------------------------------------------------------------- config file precedence
+
+def test_config_path_precedence(tmp_path, monkeypatch):
+    local = tmp_path / "lab.config.local.json"
+    monkeypatch.delenv("LAB_CONFIG", raising=False)
+    assert config_path(local=local) == DEFAULT_CONFIG_PATH  # no local file yet
+    local.write_text("{}")
+    assert config_path(local=local) == local  # local file wins over the default
+    monkeypatch.setenv("LAB_CONFIG", str(tmp_path / "env.json"))
+    assert config_path(local=local) == (tmp_path / "env.json").resolve()  # $LAB_CONFIG wins over local
+    assert config_path("explicit.json", local=local) == Path("explicit.json").resolve()  # --config wins
 
 
 # ---------------------------------------------------------------- schedule
@@ -213,7 +227,8 @@ def test_sigv4_request_for_bedrock_and_documented_url(cfg):
 
 def test_dry_run_prints_plan_without_credentials():
     env = {k: v for k, v in os.environ.items() if not k.startswith("AWS_")}
-    env.update(AWS_CONFIG_FILE="/nonexistent", AWS_SHARED_CREDENTIALS_FILE="/nonexistent")
+    env.update(AWS_CONFIG_FILE="/nonexistent", AWS_SHARED_CREDENTIALS_FILE="/nonexistent",
+               LAB_CONFIG=str(DEFAULT_CONFIG_PATH))
     result = subprocess.run(
         [sys.executable, "-m", "traffic", "run", "--mode", "direct", "--dry-run"],
         cwd=REPO_ROOT, env=env, capture_output=True, text=True, timeout=60,
