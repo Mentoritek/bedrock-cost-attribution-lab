@@ -4,6 +4,9 @@
 
 > **Sample data notice.** Every team, user, prompt and dollar figure in this repository is fictional sample data made for this lab. Nothing here comes from any client or real workload.
 
+> [!IMPORTANT]
+> **Before you deploy, read [Gotchas and tips](#gotchas-and-tips).** Some of what can go wrong is AWS behavior outside this repo's control.
+
 ## What it shows
 
 Amazon Bedrock gives you three separate attribution layers. Each one answers a different question:
@@ -171,6 +174,97 @@ The two Logs Insights queries are in [`queries/logs-insights/`](queries/README.m
 - **Two things the docs leave open, recorded by the run rather than assumed:**
   - how Billing lists IAM-principal tag keys (with or without a prefix)
   - whether the gateway role's own `path` tag still applies to sessions that carry session tags
+
+## Gotchas and tips
+
+These come from our own deploy log, plus a few behaviors the AWS docs describe. Things AWS controls come first. **Controlled by** tells you whether a fix is something this repo can make at all.
+
+### Controlled by AWS
+
+#### New account blocked from Bedrock while AWS verifies it
+
+- **What you'll see:** every identity fails `smoke`, even though the deploy succeeded:
+  ```
+  AccessDeniedException ... Your account is currently being verified. Verification normally takes less than 2 hours. Until your account is verified, you may not have access to this operation. If you are still receiving this message after more than 2 hours, please let us know by writing to aws-verification@amazon.com.
+  ```
+- **Why:** AWS verifies newly created accounts. In our run, CloudFormation, IAM, S3 and CloudWatch all worked during verification; Bedrock inference didn't.
+- **What to do:** create the account a few hours (or a day) before day 0, or wait and rerun `uv run python -m traffic smoke`. Don't start the day-0 traffic run until `smoke` is OK for every identity. If it lasts more than 2 hours, email the address in the message.
+- **Controlled by:** AWS.
+
+#### `aws login` profiles need the AWS Common Runtime (CRT)
+
+- **What you'll see** (from `scripts/preflight.py`):
+  ```
+  botocore.exceptions.MissingDependencyException: Missing Dependency: Using the login credential provider requires an additional dependency. You will need to pip install "botocore[crt]" before proceeding.
+  ```
+- **Why:** profiles that sign in with `aws login` use a credential provider that needs the CRT. The [boto3 credentials guide](https://docs.aws.amazon.com/boto3/latest/guide/credentials.html) lists "Boto3 version 1.41.0 or later with AWS Common Runtime (CRT)" as a prerequisite.
+- **What to do:** **fixed in this repo.** `requirements.txt` pins `botocore[crt]==1.43.116`. On an older clone, pull and rerun `uv pip install -r requirements.txt`.
+- **Controlled by:** the AWS SDK.
+
+#### Documented behavior: tags take time and aren't retroactive
+
+- **What you'll see:** `scripts/activate_tags.py` says a tag key isn't listed yet, or Cost Explorer shows no `team` rows on day 0.
+- **Why:** per the AWS docs, cost allocation tags appear in Billing only after the principal's first Bedrock call, can take up to 24 hours, and don't apply to earlier usage.
+- **What to do:** follow the day 0 / day 1 timing in [Steps](#steps). Rerun `activate_tags.py` until every key is listed.
+- **Controlled by:** AWS.
+
+#### Documented behavior: invocation logging is one setting per account and Region
+
+- **What you'll see:** `scripts/preflight.py` stops if this account and Region already have Bedrock model invocation logging configured.
+- **Why:** per the AWS docs, there's one logging configuration per account and Region. Deploying would overwrite it, so the lab refuses.
+- **What to do:** use an account and Region where invocation logging isn't already in use; the lab's standalone test account is one.
+- **Controlled by:** AWS. This repo refuses to overwrite it.
+
+#### Documented behavior: tear down in order
+
+- **What you'll see:** nothing stops you from destroying `BedrockCostLab` first.
+- **Why:** the export stack reads the bucket name through a weak cross-stack reference (`Fn::GetStackOutput`). Per the CDK docs, with a weak reference the producing stack can be deleted independently of its consumers.
+- **What to do:** destroy `BedrockCostLabCurExport` first, then `BedrockCostLab`, then run `scripts/teardown_check.py` (see [Teardown](#teardown)).
+- **Controlled by:** AWS CDK / CloudFormation.
+
+#### Documented behavior: billed amounts are cents
+
+- **What you'll see:** Cost Explorer and CUR figures of a few cents per team.
+- **Why:** the lab's default volume is small (see [Cost](#cost)).
+- **What to do:** read the *shares* between teams. To get bigger figures, raise `traffic.callsPerRun` in your local config; cost scales linearly with it.
+- **Controlled by:** AWS pricing; volume is your setting.
+
+### Controlled by tooling
+
+#### `npm ci` warnings: deprecated `glob`, audit findings, skipped install scripts
+
+- **What you'll see** during `cd cdk && npm ci`:
+  - a deprecation warning for `glob@10.5.0`
+  - `19 moderate severity vulnerabilities`
+  - install scripts skipped for `@parcel/watcher`, `@swc/core`, `esbuild`, `fsevents` and `unrs-resolver` ("not yet covered by allowScripts")
+
+  `cdk synth` and the deploy still work.
+- **Why:** all of these come from dev and build tooling, not from deployed code. Newer npm blocks dependency install scripts until they're approved.
+- **What to do:** **fixed in this repo.** `cdk/package.json` records an `allowScripts` decision for all five packages, so the skipped-script warning no longer appears. The audit findings and the `glob` deprecation notice still appear; the Install notes under [Steps](#steps) explain the audit findings.
+  - Don't run `npm audit fix --force`: it breaks the pinned versions.
+  - If `cdk synth` ever fails with an esbuild or swc binary error, approve those two:
+    ```bash
+    npm install-scripts approve esbuild @swc/core
+    ```
+- **Controlled by:** npm and the dev tooling.
+
+#### Use uv for Python; a `python3` shim can produce a broken venv
+
+- **What you'll see:** a venv created with `python3 -m venv` that can't find the Python standard library. In our run, `python3` on PATH was a uv-managed shim.
+- **Why:** the venv pointed at the shim rather than at a real interpreter.
+- **What to do:** **the README now uses uv for every step.** Create the venv with `uv venv --python 3.12`, install with `uv pip install -r requirements.txt`, and run everything with `uv run`. Don't rebuild an existing `.venv` with a different interpreter.
+- **Controlled by:** your local tooling.
+
+### Controlled by this repo
+
+#### Your email and prices in a tracked file
+
+- **What you'll see:** filling in `budget.email` and `pricing` in `config/lab.config.json` leaves personal, uncommitted edits in a public repo.
+- **Why:** `config/lab.config.json` is committed.
+- **What to do:** **fixed in this repo.** Put your values in `config/lab.config.local.json`. Git ignores it, and every tool reads it instead of the tracked file when it exists (see [Steps](#steps)).
+- **Controlled by:** this repo.
+
+Hit something not listed? [Open an issue](https://github.com/Mentoritek/bedrock-cost-attribution-lab/issues).
 
 ## Teardown
 
