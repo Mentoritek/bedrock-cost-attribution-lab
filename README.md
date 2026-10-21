@@ -20,7 +20,7 @@ Amazon Bedrock gives you three separate attribution layers. Each one answers a d
 
 ```mermaid
 flowchart LR
-  op([Operator<br/>python -m traffic]) --> tr["Team roles<br/>BedrockLab-Team-*<br/>tags team, path=direct"]
+  op([Operator<br/>uv run python -m traffic]) --> tr["Team roles<br/>BedrockLab-Team-*<br/>tags team, path=direct"]
   op --> gw["Gateway role<br/>BedrockLab-Gateway<br/>tags team=gateway, path=gateway"]
   gw -. "shared: one session (llm-gateway)" .-> br
   gw -. "per-user: one session per user<br/>+ session tags team, user" .-> br
@@ -38,7 +38,7 @@ Two CDK stacks deploy it:
 - **`BedrockCostLab`** (day 0): team roles, gateway role, application inference profile, invocation log group and logging role, the model invocation logging setting (an `AwsCustomResource`, because CloudFormation has no resource type for it), the CUR 2.0 bucket, and a $25 monthly budget alert.
 - **`BedrockCostLabCurExport`** (day 1): the CUR 2.0 export with IAM principal data. It's a separate stack on purpose. Some traffic has to exist *before* the export does, so test T6 can check what the export shows for that earlier usage.
 
-Every name, tag, team, weight, model, price and email lives in [`config/lab.config.json`](config/lab.config.json). The CDK app and the Python tools both read that file. Remove a team from it and its role, its traffic and its rows disappear everywhere.
+Every name, tag, team, weight, model, price and email lives in [`config/lab.config.json`](config/lab.config.json). The CDK app and the Python tools both read that file. **Put your own email and prices in `config/lab.config.local.json`**, a copy of that file that git ignores. When the local file exists, every tool reads it instead of `lab.config.json`, so your details never end up in a commit. Remove a team from it and its role, its traffic and its rows disappear everywhere.
 
 ## Prerequisites
 
@@ -48,8 +48,8 @@ Every name, tag, team, weight, model, price and email lives in [`config/lab.conf
 - **Region `us-east-1`.** The Data Exports bucket policy names `arn:aws:bcm-data-exports:us-east-1:…`, and gpt-oss-20b is offered in-Region in us-east-1.
 - **AWS CLI v2** with a profile that can administer the account. `requirements.txt` includes the botocore CRT extra, so profiles that sign in with `aws login` work; other credential types need nothing extra.
 - **Node.js LTS** (see [`.nvmrc`](.nvmrc); `nvm use`) and npm.
-- **Python 3.12+.**
-- **Bedrock access to `openai.gpt-oss-20b-1:0`.** If `python -m traffic smoke` returns `AccessDeniedException`, open the model's page in the Bedrock console's model catalog / model access page and accept its terms, then retry.
+- **[uv](https://docs.astral.sh/uv/)** to manage Python. Follow the official [uv installation guide](https://docs.astral.sh/uv/getting-started/installation/). uv provides Python 3.12+ itself, so you don't need a separate Python install. Every Python command in this README runs through `uv run`.
+- **Bedrock access to `openai.gpt-oss-20b-1:0`.** If `uv run python -m traffic smoke` returns `AccessDeniedException`, open the model's page in the Bedrock console's model catalog / model access page and accept its terms, then retry.
 - **Invocation logging must be free.** Bedrock model invocation logging is one setting per account and Region. This lab owns it while deployed, and `preflight.py` refuses to continue if something else already configured it.
 
 ## Cost
@@ -75,23 +75,29 @@ Pick your recording or review date first. **Day 0 must be at least 3 days before
 ```bash
 # once
 cd cdk && npm ci && cd ..
-python3 -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt
+uv venv --python 3.12
+uv pip install -r requirements.txt
+cp config/lab.config.json config/lab.config.local.json   # then put your email and prices in the local file
 ```
+
+Two things you'll see during `npm ci`, both expected:
+- **Skipped install scripts.** npm blocks dependency install scripts by default. [`cdk/package.json`](cdk/package.json) records an explicit `allowScripts` denial for each package that has one: `esbuild`, `@swc/core`, `@parcel/watcher`, `fsevents` and `unrs-resolver`. All of them ship prebuilt binaries, and their scripts are only build or verify fallbacks that the CDK app and tests don't need ([npm install-scripts](https://docs.npmjs.com/cli/v11/commands/npm-install-scripts)).
+- **`npm audit` warnings.** They come from the dev tooling (the jest test runner's dependency tree), not from `aws-cdk-lib` or `constructs`. `npm audit --omit=dev` reports none. Don't run `npm audit fix --force`: it would replace the pinned versions, for example by downgrading jest to 25.0.0, and break the tests.
 
 | When | Step | Command | Test |
 |---|---|---|---|
-| Day 0 | Set `budget.email` (and optionally `pricing`) in `config/lab.config.json` | edit the file | — |
-| Day 0 | Preflight: account type, logging free, boto3 new enough | `python scripts/preflight.py` | T0 |
+| Day 0 | Set `budget.email` (and optionally `pricing`) in `config/lab.config.local.json` | edit the file | — |
+| Day 0 | Preflight: account type, logging free, boto3 new enough | `uv run python scripts/preflight.py` | T0 |
 | Day 0 | Bootstrap CDK, deploy the main stack | `cd cdk && npx cdk bootstrap && npx cdk deploy BedrockCostLab` | T0 |
-| Day 0 | Smoke test + log check | `python -m traffic smoke` then `python scripts/verify.py t0` | T0 |
-| Day 0 | **Traffic before tag activation and before the export exists** | `python -m traffic run --mode direct --run-id day0-pre` | T5, T6 |
-| Day 1 (a few hours to 24 h later) | Activate cost allocation tags (re-run until all keys are listed) | `python scripts/activate_tags.py` | T1, T5 |
+| Day 0 | Smoke test + log check | `uv run python -m traffic smoke` then `uv run python scripts/verify.py t0` | T0 |
+| Day 0 | **Traffic before tag activation and before the export exists** | `uv run python -m traffic run --mode direct --run-id day0-pre` | T5, T6 |
+| Day 1 (a few hours to 24 h later) | Activate cost allocation tags (re-run until all keys are listed) | `uv run python scripts/activate_tags.py` | T1, T5 |
 | Day 1 | Create the CUR 2.0 export, now that usage exists | `cd cdk && npx cdk deploy BedrockCostLabCurExport` | T6 |
-| Day 1 (after activation) | Post-activation traffic | `python -m traffic run --mode direct --run-id day1-direct` | T1, T4 |
-| Day 1 | Gateway, one shared session | `python -m traffic run --mode gateway-shared --run-id day1-gw-shared` | T2 |
-| Day 1 | Gateway, one session per user | `python -m traffic run --mode gateway-per-user --run-id day1-gw-peruser` | T2 |
-| Day 1 | Chat Completions check | `python -m traffic check-chat-completions` | T3 |
-| Day 2 | Read results | `python scripts/verify.py t1` … `t6` | T1–T6 |
+| Day 1 (after activation) | Post-activation traffic | `uv run python -m traffic run --mode direct --run-id day1-direct` | T1, T4 |
+| Day 1 | Gateway, one shared session | `uv run python -m traffic run --mode gateway-shared --run-id day1-gw-shared` | T2 |
+| Day 1 | Gateway, one session per user | `uv run python -m traffic run --mode gateway-per-user --run-id day1-gw-peruser` | T2 |
+| Day 1 | Chat Completions check | `uv run python -m traffic check-chat-completions` | T3 |
+| Day 2 | Read results | `uv run python scripts/verify.py t1` … `t6` | T1–T6 |
 | After | Tear down | see [Teardown](#teardown) | — |
 
 Why the waits:
@@ -103,16 +109,21 @@ Why the waits:
 Useful flags:
 - Every command takes `--profile <name>` and `--config <path>`.
 - `--show-ids` turns off account-ID masking. By default, all console output replaces any 12-digit number with `************` so recordings don't show your account ID.
-- `python -m traffic run --mode direct --dry-run` prints the call plan without touching AWS. The plan is deterministic: the same config and seed always give the same plan.
-- For `cdk synth`/`deploy` without editing the file, pass `-c budgetEmail=you@example.com`. Use `-c configPath=…` (or set `LAB_CONFIG`) for an alternative config file.
+- `uv run python -m traffic run --mode direct --dry-run` prints the call plan without touching AWS. The plan is deterministic: the same config and seed always give the same plan.
+- Config file order, first match wins:
+  1. `--config <path>` (Python) or `-c configPath=<path>` (CDK)
+  2. the `LAB_CONFIG` environment variable
+  3. `config/lab.config.local.json`, if it exists
+  4. `config/lab.config.json`
+- For `cdk synth`/`deploy` you can also pass `-c budgetEmail=you@example.com` instead of editing a file.
 
 **If CloudFormation rejects the export.** CloudFormation documents the export's `TableConfigurations` as "Object of String", while the Data Exports API uses a map keyed by table name, which is what the stack sends. If `cdk deploy BedrockCostLabCurExport` fails on that property, create the identical export with the API instead:
 
 ```bash
-python scripts/create_export_cli.py create
+uv run python scripts/create_export_cli.py create
 ```
 
-At teardown, use `python scripts/create_export_cli.py delete` in place of destroying that stack.
+At teardown, use `uv run python scripts/create_export_cli.py delete` in place of destroying that stack.
 
 ## Reading the results
 
@@ -167,7 +178,7 @@ The two Logs Insights queries are in [`queries/logs-insights/`](queries/README.m
 cd cdk
 npx cdk destroy BedrockCostLabCurExport
 npx cdk destroy BedrockCostLab
-cd .. && python scripts/teardown_check.py            # add --deactivate-tags to set the tag keys back to Inactive
+cd .. && uv run python scripts/teardown_check.py            # add --deactivate-tags to set the tag keys back to Inactive
 ```
 
 `teardown_check.py` confirms each of these is gone and reports anything left:
@@ -195,7 +206,7 @@ What stays behind:
 │   ├── lib/attribution-lab-stack.ts
 │   ├── lib/cur-export-stack.ts
 │   └── test/stacks.test.ts       assertions (npx jest)
-├── traffic/                      python -m traffic run | smoke | check-chat-completions
+├── traffic/                      uv run python -m traffic run | smoke | check-chat-completions
 ├── scripts/                      preflight, activate_tags, verify (t0–t6), teardown_check, create_export_cli
 ├── queries/logs-insights/        tokens-by-team-feature, tokens-by-principal
 ├── tests/                        pytest (offline; no AWS calls)
@@ -207,7 +218,7 @@ Developer checks (no AWS calls):
 
 ```bash
 cd cdk && npm ci && npx tsc --noEmit && CDK_DEFAULT_ACCOUNT=111111111111 npx cdk synth -c budgetEmail=lab-owner@example.com && npx jest
-cd .. && pip install -r requirements-dev.txt && ruff check . && pytest
+cd .. && uv pip install -r requirements-dev.txt && uv run ruff check . && uv run pytest
 ```
 
 ## Sources for publication
