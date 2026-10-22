@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 from botocore.credentials import Credentials
 
-from traffic.chat_completions_check import SIGNING_SERVICE, build_signed_request, endpoint_url
+from traffic.chat_completions_check import SIGNING_SERVICE, build_signed_request, endpoint_url, to_urllib
 from traffic.config import DEFAULT_CONFIG_PATH, REPO_ROOT, ConfigError, config_path, load_config, validate
 from traffic.invoke import check_metadata, converse_with_backoff, request_metadata
 from traffic.redact import MASK, redact
@@ -220,7 +220,21 @@ def test_sigv4_request_for_bedrock_and_documented_url(cfg):
     assert auth.startswith("AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/")
     assert "/us-east-1/bedrock/aws4_request" in auth
     assert req.headers["X-Amz-Security-Token"] == "FAKE-SESSION-TOKEN"
-    assert b'"model": "openai.gpt-oss-20b-1:0"' in req.data.encode() if isinstance(req.data, str) else req.data
+    assert isinstance(req.data, bytes)
+    assert b'"model": "openai.gpt-oss-20b-1:0"' in req.data
+
+
+def test_signed_request_passes_urllib_body_check(cfg):
+    """Regression: a str body raised TypeError in urllib's do_request_ before anything was sent."""
+    import urllib.request
+
+    fake = Credentials("AKIDEXAMPLE", "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY", "FAKE-SESSION-TOKEN")
+    req = to_urllib(build_signed_request(fake, cfg["region"], cfg["model"]["foundationModelId"], 16))
+    opener = urllib.request.build_opener()
+    handler = next(h for h in opener.handlers if isinstance(h, urllib.request.HTTPSHandler))
+    checked = handler.do_request_(req)  # the check that failed; prepares the request, no network call
+    assert isinstance(checked.data, bytes)
+    assert checked.get_header("Content-length") == str(len(checked.data))
 
 
 # ---------------------------------------------------------------- CLI

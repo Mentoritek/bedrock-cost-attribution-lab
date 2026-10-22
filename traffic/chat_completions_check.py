@@ -24,9 +24,10 @@ def endpoint_url(region: str) -> str:
 
 def build_signed_request(credentials, region: str, model: str, max_tokens: int) -> AWSRequest:
     """credentials: a botocore Credentials object (fake ones in tests; nothing is sent here)."""
+    # Bytes, not str: urllib rejects a str POST body, and SigV4 must sign exactly the bytes that are sent.
     body = json.dumps(
         {"model": model, "messages": [{"role": "user", "content": SAMPLE_MESSAGE}], "max_tokens": max_tokens}
-    )
+    ).encode("utf-8")
     request = AWSRequest(
         method="POST",
         url=endpoint_url(region),
@@ -37,10 +38,14 @@ def build_signed_request(credentials, region: str, model: str, max_tokens: int) 
     return request
 
 
-def send(request: AWSRequest, timeout: float = 60.0) -> dict[str, Any]:
+def to_urllib(request: AWSRequest) -> urllib.request.Request:
     prepared = request.prepare()
-    req = urllib.request.Request(prepared.url, data=prepared.body, headers=dict(prepared.headers),
-                                 method=prepared.method)
+    return urllib.request.Request(prepared.url, data=prepared.body, headers=dict(prepared.headers),
+                                  method=prepared.method)
+
+
+def send(request: AWSRequest, timeout: float = 60.0) -> dict[str, Any]:
+    req = to_urllib(request)
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             raw = resp.read().decode("utf-8", "replace")
