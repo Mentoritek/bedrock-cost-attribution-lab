@@ -11,7 +11,7 @@ from botocore.credentials import Credentials
 
 from traffic.chat_completions_check import SIGNING_SERVICE, build_signed_request, endpoint_url, to_urllib
 from traffic.config import DEFAULT_CONFIG_PATH, REPO_ROOT, ConfigError, config_path, load_config, validate
-from traffic.invoke import check_metadata, converse_with_backoff, request_metadata
+from traffic.invoke import RETRYABLE, check_metadata, converse_with_backoff, request_metadata
 from traffic.redact import MASK, redact
 from traffic.schedule import assign_users, build_plan, feature_counts, plan_table, team_counts
 
@@ -178,6 +178,50 @@ def test_backoff_retries_throttling_then_succeeds():
 
     assert converse_with_backoff(Client(), 6, sleep=lambda s: None) == {"ok": True}
     assert calls["n"] == 3
+
+
+def _failing_client(codes):
+    """converse() raises one ClientError-shaped exception per code in `codes`, then succeeds."""
+    class Failure(Exception):
+        def __init__(self, code):
+            super().__init__(code)
+            self.response = {"Error": {"Code": code}}
+
+    class Client:
+        calls = 0
+
+        def converse(self, **kwargs):
+            Client.calls += 1
+            if Client.calls <= len(codes):
+                raise Failure(codes[Client.calls - 1])
+            return {"ok": True}
+
+    return Client()
+
+
+@pytest.mark.parametrize("code", sorted(RETRYABLE))
+def test_backoff_retries_documented_transient_errors(code):
+    # Deploy log entry 11: one InternalServerException ("Try your request again") failed a call unretried.
+    sleeps = []
+    client = _failing_client([code, code])
+    assert converse_with_backoff(client, 6, sleep=sleeps.append) == {"ok": True}
+    assert type(client).calls == 3 and len(sleeps) == 2
+
+
+@pytest.mark.parametrize("code", ["ValidationException", "AccessDeniedException", "ResourceNotFoundException",
+                                  "ModelTimeoutException", "ModelErrorException"])
+def test_backoff_does_not_retry_other_errors(code):
+    client = _failing_client([code])
+    with pytest.raises(Exception, match=code):
+        converse_with_backoff(client, 6, sleep=lambda s: None)
+    assert type(client).calls == 1
+
+
+def test_retryable_codes_are_converse_errors_in_botocore():
+    from botocore.session import get_session
+
+    op = get_session().get_service_model("bedrock-runtime").operation_model("Converse")
+    assert RETRYABLE <= {shape.name for shape in op.error_shapes}
 
 
 def test_backoff_gives_up_after_max_attempts():

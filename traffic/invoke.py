@@ -12,7 +12,19 @@ from typing import Any
 from .common import error_code, utc_iso
 from .prompts import prompt_for
 
-THROTTLING = "ThrottlingException"
+# Transient errors the Bedrock docs say to retry with exponential backoff and jitter:
+# - ThrottlingException (429), InternalServerException (500) and ServiceUnavailableException (503):
+#   https://docs.aws.amazon.com/bedrock/latest/userguide/troubleshooting-api-error-codes.html
+#   (the Converse API reference links the last two to its InternalFailure and ServiceUnavailable sections)
+# - ModelNotReadyException (429): "The AWS SDK will automatically retry the operation up to 5 times",
+#   https://docs.aws.amazon.com/bedrock/latest/APIReference/API_runtime_Converse.html
+# Everything else (validation, access, not found, model timeout) fails straight away.
+RETRYABLE = frozenset({
+    "ThrottlingException",
+    "InternalServerException",
+    "ServiceUnavailableException",
+    "ModelNotReadyException",
+})
 
 # Converse API reference: at most 16 entries; key [a-zA-Z0-9\s:_@$#=/+,-.]{1,256}, value {0,256}.
 MAX_METADATA_ENTRIES = 16
@@ -51,12 +63,12 @@ def model_for(cfg: dict[str, Any], outputs: dict[str, Any], feature: str) -> str
 
 
 def converse_with_backoff(client, max_attempts: int, sleep=time.sleep, **kwargs) -> dict[str, Any]:
-    """Exponential backoff with full jitter on ThrottlingException, up to max_attempts tries."""
+    """Exponential backoff with full jitter on the RETRYABLE errors, up to max_attempts tries."""
     for attempt in range(1, max_attempts + 1):
         try:
             return client.converse(**kwargs)
         except Exception as exc:  # botocore ClientError
-            if error_code(exc) != THROTTLING or attempt == max_attempts:
+            if error_code(exc) not in RETRYABLE or attempt == max_attempts:
                 raise
             sleep(random.uniform(0, min(20.0, 0.5 * 2 ** attempt)))
     raise RuntimeError("unreachable")

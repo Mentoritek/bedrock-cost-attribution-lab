@@ -49,7 +49,7 @@ class IdentityCache:
 
 
 def _no_sdk_retries():
-    # invoke.py does its own exponential backoff on ThrottlingException.
+    # invoke.py does its own exponential backoff on the transient errors Bedrock documents as retryable.
     from botocore.config import Config
 
     return Config(retries={"total_max_attempts": 1})
