@@ -57,17 +57,28 @@ Every name, tag, team, weight, model, price and email lives in [`config/lab.conf
 
 ## Cost
 
-These are small numbers. On the default volume the bill is cents per team, so the *shares* between teams carry the story.
+These are small numbers. Our estimate (not documented AWS behavior) is a bill of cents per team on the default volume, so the *shares* between teams carry the story. Our measured run, below the table, came out the same way.
 
-| What | Why it costs anything | Expect |
+| What | Why it costs anything | Our estimate |
 |---|---|---|
 | Bedrock tokens | About 2,500 calls in total (4 runs × 600 calls, plus smoke and T3), each about 300 input and up to 256 output tokens | well under $1 at gpt-oss-20b rates. Check the current us-east-1 price on the [Bedrock pricing page](https://aws.amazon.com/bedrock/pricing/) |
 | CloudWatch Logs | A few MB of invocation logs | cents at most |
 | CUR 2.0 bucket | Data Exports writes a few small Parquet files; standard S3 storage rates apply | cents |
 | Lambda | A handful of custom-resource invocations at deploy and destroy | negligible |
-| Cost Explorer API | Each `verify.py` Cost Explorer request may be billed per request | cents if you run it a few dozen times |
+| Cost Explorer API | Each `verify.py` Cost Explorer request is billed per request | cents, but a large share of a lab this small (see measured figures) |
 
-**Likely total: under $2.** The stack also creates a **$25 monthly budget** that emails you at 80% of actual spend and at 100% of forecast spend. Volume is one setting (`traffic.callsPerRun`), and cost scales linearly with it.
+**Our estimate: under $2.**
+
+**Measured in our run** (AWS Bills, October 2026, as of 2026-10-23 09:39 CDT, after every test's traffic and one reading of `verify.py` t1–t6, with t5 read twice):
+
+| Service | Billed |
+|---|---|
+| Amazon Bedrock | $0.20 |
+| AWS Cost Explorer (the `verify.py` API reads) | $0.09 |
+| Everything else | $0.00 |
+| **Total before tax** | **$0.29** (estimated total with tax: $0.31) |
+
+Run the `verify.py` subcommands a few times, not in a loop, and do your exploring in the Cost Explorer console. Our reads alone cost almost half as much as all the Bedrock traffic. The stack also creates a **$25 monthly budget** that emails you at 80% of actual spend and at 100% of forecast spend. Volume is one setting (`traffic.callsPerRun`), and cost scales linearly with it.
 
 **Tear it down when you're done** (see [Teardown](#teardown)).
 
@@ -154,6 +165,7 @@ Each `verify.py` subcommand prints a table and writes `results/<test>.json`. It 
 - **T5 — `verify.py t5 [--day …]`.**
   - Cost Explorer for the pre-activation day grouped by `team`, printing the raw group keys, including the no-tag group.
   - CUR hourly rows before vs after the activation timestamp.
+  - If Cost Explorer returns nothing for that day, t5 prints `(no data returned)` and still shows the CUR rows. In our run, Cost Explorer's API returned no data for the account's first day, while CUR had $0.06 of Bedrock for it.
 - **T6 — `verify.py t6`.** Three timestamps side by side:
   - the first lab call in `runs/`
   - when the export was created
@@ -188,8 +200,26 @@ These come from our own deploy log, plus a few behaviors the AWS docs describe. 
   AccessDeniedException ... Your account is currently being verified. Verification normally takes less than 2 hours. Until your account is verified, you may not have access to this operation. If you are still receiving this message after more than 2 hours, please let us know by writing to aws-verification@amazon.com.
   ```
 - **Why:** AWS verifies newly created accounts. In our run, CloudFormation, IAM, S3 and CloudWatch all worked during verification; Bedrock inference didn't.
+- **How long it took for us:** blocked at 08:57 CDT, working at our next try about 10:05 CDT, so under about 70 minutes. We didn't retry in between, so the exact clearing time is unknown.
 - **What to do:** create the account a few hours (or a day) before day 0, or wait and rerun `uv run python -m traffic smoke`. Don't start the day-0 traffic run until `smoke` is OK for every identity. If it lasts more than 2 hours, email the address in the message.
 - **Controlled by:** AWS.
+
+#### Occasional transient Bedrock errors
+
+- **What you'll see** (one call in one 600-call run, in our case):
+  ```
+  InternalServerException: ... (reached max retries: 0): The system encountered an unexpected error during processing. Try your request again.
+  ```
+- **Why:** a transient server-side error. This is normal at volume: the other runs were 600/600.
+- **What to do:** **fixed in this repo.** The traffic generator now retries the errors the Bedrock docs list as transient (`ThrottlingException`, `InternalServerException`, `ServiceUnavailableException`, `ModelNotReadyException`) with exponential backoff and jitter ([Bedrock API error codes](https://docs.aws.amazon.com/bedrock/latest/userguide/troubleshooting-api-error-codes.html)). Validation, access and timeout errors still fail straight away and are logged in `runs/<run_id>.jsonl`.
+- **Controlled by:** AWS (the error); this repo (the retry).
+
+#### Cost Explorer API reads cost money
+
+- **What you'll see:** an **AWS Cost Explorer** line on your bill. In our run it was $0.09, next to $0.20 of Bedrock.
+- **Why:** each `verify.py` subcommand makes several Cost Explorer API requests, and AWS bills API requests.
+- **What to do:** run the `verify.py` subcommands a few times, not repeatedly, and explore in the Cost Explorer console instead. See [Cost](#cost) for our measured bill.
+- **Controlled by:** AWS pricing; how often you run `verify.py` is up to you.
 
 #### `aws login` profiles need the AWS Common Runtime (CRT)
 
@@ -222,14 +252,25 @@ These come from our own deploy log, plus a few behaviors the AWS docs describe. 
 - **What to do:** destroy `BedrockCostLabCurExport` first, then `BedrockCostLab`, then run `scripts/teardown_check.py` (see [Teardown](#teardown)).
 - **Controlled by:** AWS CDK / CloudFormation.
 
-#### Documented behavior: billed amounts are cents
+#### Our estimate, confirmed in our run: billed amounts are cents
 
-- **What you'll see:** Cost Explorer and CUR figures of a few cents per team.
-- **Why:** the lab's default volume is small (see [Cost](#cost)).
+This one is our estimate from the lab's volume, not documented AWS behavior.
+
+- **What you'll see:** Cost Explorer and CUR figures of a few cents per team. Our October total was $0.20 of Bedrock (see [Cost](#cost)).
+- **Why:** the lab's default volume is small.
 - **What to do:** read the *shares* between teams. To get bigger figures, raise `traffic.callsPerRun` in your local config; cost scales linearly with it.
 - **Controlled by:** AWS pricing; volume is your setting.
 
 ### Controlled by tooling
+
+#### Your account ID shows in `cdk deploy` output and the console header
+
+- **What you'll see:** the 12-digit account ID, in full:
+  - in raw `cdk deploy` output, inside role, profile, export and stack ARNs
+  - in the AWS console header, next to your account name
+- **Why:** this repo's masking (`redact.py`, turned off with `--show-ids`) only covers the lab's own Python scripts. It can't touch the CDK CLI or the AWS console.
+- **What to do:** before you record or share screenshots, don't show raw `cdk deploy` output, or blur it afterwards. In the console, blur the header or hide the account ID in the console settings.
+- **Controlled by:** the CDK CLI and the AWS console.
 
 #### `npm ci` warnings: deprecated `glob`, audit findings, skipped install scripts
 
