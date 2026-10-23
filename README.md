@@ -164,8 +164,8 @@ Each `verify.py` subcommand prints a table and writes `results/<test>.json`. It 
   - Compares that estimate with the Cost Explorer Bedrock total for the same day, as a difference in $ and %.
 - **T5 — `verify.py t5 [--day …]`.**
   - Cost Explorer for the pre-activation day grouped by `team`, printing the raw group keys, including the no-tag group.
-  - CUR hourly rows before vs after the activation timestamp.
-  - If Cost Explorer returns nothing for that day, t5 prints `(no data returned)` and still shows the CUR rows. In our run, Cost Explorer's API returned no data for the account's first day, while CUR had $0.06 of Bedrock for it.
+  - CUR hourly rows before vs after the activation timestamp. Whole hours are labeled `before` or `after`. The hour that contains the activation time is labeled `activation hour`, because it mixes calls from both sides and CUR can't split an hour.
+  - If Cost Explorer returns nothing for that day, t5 prints `(no data returned)` and still shows the CUR rows. In our run, Cost Explorer returned no data for the account's first day (see [Gotchas and tips](#gotchas-and-tips)).
 - **T6 — `verify.py t6`.** Three timestamps side by side:
   - the first lab call in `runs/`
   - when the export was created
@@ -230,6 +230,27 @@ These come from our own deploy log, plus a few behaviors the AWS docs describe. 
 - **Why:** profiles that sign in with `aws login` use a credential provider that needs the CRT. The [boto3 credentials guide](https://docs.aws.amazon.com/boto3/latest/guide/credentials.html) lists "Boto3 version 1.41.0 or later with AWS Common Runtime (CRT)" as a prerequisite.
 - **What to do:** **fixed in this repo.** `requirements.txt` pins `botocore[crt]==1.43.116`. On an older clone, pull and rerun `uv pip install -r requirements.txt`.
 - **Controlled by:** the AWS SDK.
+
+#### Tag keys took most of a day to become listable; IAM-principal keys carry a prefix
+
+- **What you'll see:** `scripts/activate_tags.py` lists none of the lab's tag keys for hours after the first calls. In our run:
+  - first successful Bedrock calls at about 10:05 CDT on day 0
+  - still nothing listed that afternoon
+  - listed (and activated) by 07:17 CDT the next day
+  - `iamPrincipal/user` appeared within about 10 hours of the gateway per-user run, the only run that sends a `user` tag
+- **How they're listed:** IAM-principal tags show up as `iamPrincipal/<key>` (for example `iamPrincipal/team`) with type `UserDefined`. The API has no separate IAM-principal type. Resource tags such as `app` have no prefix. `activate_tags.py` matches both forms.
+- **Why:** AWS lists a tag key only after a principal carrying it has made Bedrock calls, and that can take up to 24 hours.
+- **What to do:**
+  - Expect hours, not minutes, and rerun `activate_tags.py` until each key is listed. Rerun it after the per-user run so `user` gets activated too.
+  - Activate only the keys you use. The stack-wide `project` tag appears twice (`project` and `iamPrincipal/project`), and the lab activates neither.
+- **Controlled by:** AWS.
+
+#### Cost Explorer showed no Bedrock cost for the account's first day
+
+- **What you'll see:** for a brand-new account's first day, Cost Explorer, both the console and the API, shows no Bedrock rows at all, not even an untagged group. Meanwhile the bill and the CUR 2.0 export do include that day. In our run, CUR had $0.06 of Bedrock on day 0, and every later day matched between Cost Explorer and CUR.
+- **Why:** unknown. The Cost Explorer docs don't cover it, and we saw it once.
+- **What to do:** read pre-activation (day-0) spend from CUR's hourly rows. `verify.py t5` does this, and still prints the CUR rows when Cost Explorer returns nothing.
+- **Controlled by:** AWS.
 
 #### Documented behavior: tags take time and aren't retroactive
 
