@@ -447,16 +447,38 @@ def t5(cfg, sess, args) -> dict[str, Any]:
     df = load_cur(sess, cfg, outputs)
     work = df.copy()
     work["team"] = work[COL_TAGS].map(lambda t: principal_tag(tags_dict(t), cfg["tagKeys"]["team"]) or "(none)")
-    work["hour"] = work[COL_USAGE_START].dt.strftime("%Y-%m-%dT%H:00Z")
-    work["vsActivation"] = ("unknown" if act_at is None
-                            else work[COL_USAGE_START].map(lambda t: "before" if t < act_at else "after"))
+    hour_start = work[COL_USAGE_START].dt.floor("h")
+    work["hour"] = hour_start.dt.strftime("%Y-%m-%dT%H:00Z")
+    work["vsActivation"] = hour_start.map(lambda h: activation_label(h, act_at))
     grouped = work.groupby(["hour", "vsActivation", "team"])[COL_COST].sum().reset_index()
     cur_rows = [{"hour": r["hour"], "vsActivation": r["vsActivation"], "team": r["team"], "cost": money(r[COL_COST])}
                 for _, r in grouped.sort_values("hour").iterrows()]
     out(f"CUR 2.0 hourly Bedrock rows vs activation ({utc_iso(act_at) if act_at else 'not recorded'}):")
     table(cur_rows)
+    mixed = sorted({r["hour"] for r in cur_rows if r["vsActivation"] == ACTIVATION_HOUR})
+    if mixed:
+        out(f"Note: the {ACTIVATION_HOUR} ({', '.join(mixed)}) mixes calls made before and after activation at "
+            f"{utc_iso(act_at)}; CUR can't split an hour. Only whole hours are labeled before/after.")
     return {"day": day.isoformat(), "teamKey": team_key, "activatedAt": utc_iso(act_at) if act_at else None,
             "costExplorer": ce_result, "costExplorerNote": note, "curHourly": cur_rows}
+
+
+ACTIVATION_HOUR = "activation hour"
+
+
+def activation_label(hour_start: datetime, act_at: datetime | None) -> str:
+    """Labels a CUR hour bucket [hour_start, hour_start + 1h) against the activation time.
+
+    'before' and 'after' are whole hours; the hour that contains activation is its own bucket,
+    because it holds calls from both sides (deploy log entry 17).
+    """
+    if act_at is None:
+        return "unknown"
+    if hour_start + timedelta(hours=1) <= act_at:
+        return "before"
+    if hour_start >= act_at:
+        return "after"
+    return ACTIVATION_HOUR
 
 
 def t6(cfg, sess, args) -> dict[str, Any]:

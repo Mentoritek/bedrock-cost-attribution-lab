@@ -219,3 +219,49 @@ def test_t5_keeps_going_when_cost_explorer_has_no_bedrock_service(cfg, offline):
 def test_empty_grouped_day_is_reported_as_no_data_not_zero(cfg, offline):
     record = verify.t5(cfg, FakeSession(FakeCE()), Args())
     assert record["costExplorer"] == [{"date": "2026-10-21", "group": verify.NO_DATA, "amount": 0.0, "unit": ""}]
+
+
+# ---------------------------------------------------------------- t5 activation hour (deploy log entry 17)
+
+ACT = verify.datetime(2026, 10, 22, 12, 17, 44, tzinfo=verify.UTC)
+
+
+def _hour(h):
+    return verify.datetime(2026, 10, 22, h, tzinfo=verify.UTC)
+
+
+def test_activation_label_inside_an_hour():
+    assert verify.activation_label(_hour(11), ACT) == "before"
+    assert verify.activation_label(_hour(12), ACT) == verify.ACTIVATION_HOUR  # 12:00-13:00 holds 12:17:44
+    assert verify.activation_label(_hour(13), ACT) == "after"
+
+
+def test_activation_label_on_the_hour_boundary():
+    on_the_hour = _hour(12)
+    assert verify.activation_label(_hour(11), on_the_hour) == "before"
+    assert verify.activation_label(_hour(12), on_the_hour) == "after"
+    assert verify.activation_label(_hour(12), None) == "unknown"
+
+
+def test_t5_labels_the_activation_hour_and_says_it_mixes(cfg, offline, monkeypatch, capsys):
+    import pandas as pd
+
+    monkeypatch.setattr(verify, "activation", lambda: {"keys": {"iamPrincipal/team": {"activatedAt": utc(ACT)}}})
+    starts = ["2026-10-22T11:00:00Z", "2026-10-22T12:00:00Z", "2026-10-22T13:00:00Z"]
+    cur = pd.DataFrame({
+        verify.COL_USAGE_START: pd.to_datetime(starts, utc=True), verify.COL_COST: [0.01, 0.02, 0.03],
+        verify.COL_TAGS: [{}, {"iamPrincipal/team": "search"}, {"iamPrincipal/team": "search"}],
+        verify.COL_PRINCIPAL: ["p"] * 3, verify.COL_RESOURCE: ["r"] * 3,
+    })
+    monkeypatch.setattr(verify, "load_cur", lambda sess, cfg, outputs: cur)
+    record = verify.t5(cfg, FakeSession(FakeCE()), Args())
+    assert [(r["hour"], r["vsActivation"]) for r in record["curHourly"]] == [
+        ("2026-10-22T11:00Z", "before"),
+        ("2026-10-22T12:00Z", verify.ACTIVATION_HOUR),
+        ("2026-10-22T13:00Z", "after"),
+    ]
+    assert "mixes calls made before and after activation" in capsys.readouterr().out
+
+
+def utc(dt):
+    return dt.isoformat().replace("+00:00", "Z")
