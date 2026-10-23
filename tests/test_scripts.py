@@ -111,3 +111,111 @@ def test_export_cli_matches_cdk_columns_and_api_model(cfg):
          "ResourceTags": [{"Key": "project", "Value": "mt-01-bedrock-cost-lab"}]},
         input_shape("bcm-data-exports", "CreateExport"),
     )
+
+
+# ---------------------------------------------------------------- one-day windows (deploy log entry 13)
+
+DAY0 = date(2026, 10, 21)
+TODAY = date(2026, 10, 23)
+
+
+class FakeCE:
+    """Records Cost Explorer requests; returns a service name and an empty day (as seen for day 0)."""
+
+    def __init__(self, services=("Amazon Bedrock",)):
+        self.services, self.dimension_calls, self.cost_calls = list(services), [], []
+
+    def get_dimension_values(self, **kw):
+        self.dimension_calls.append(kw)
+        return {"DimensionValues": [{"Value": s} for s in self.services]}
+
+    def get_cost_and_usage(self, **kw):
+        self.cost_calls.append(kw)
+        start = kw["TimePeriod"]["Start"]
+        return {"ResultsByTime": [{"TimePeriod": {"Start": start}, "Groups": [], "Total": {}}]}
+
+
+class FakeLogs:
+    def __init__(self):
+        self.started = []
+
+    def start_query(self, **kw):
+        self.started.append(kw)
+        return {"queryId": "q"}
+
+    def get_query_results(self, queryId):
+        return {"status": "Complete", "results": []}
+
+
+class FakeSession:
+    def __init__(self, ce, logs=None):
+        self.clients = {"ce": ce, "logs": logs}
+
+    def client(self, name):
+        return self.clients[name]
+
+
+@pytest.fixture
+def offline(monkeypatch):
+    import pandas as pd
+
+    monkeypatch.setattr(verify, "utc_now", lambda: verify.datetime(2026, 10, 23, 14, 30, tzinfo=verify.UTC))
+    monkeypatch.setattr(verify, "first_day_of_mode", lambda mode=None: DAY0)
+    monkeypatch.setattr(verify, "last_day_of_mode", lambda mode: DAY0)
+    monkeypatch.setattr(verify, "activation", lambda: None)
+    monkeypatch.setattr(verify, "lab_outputs", lambda sess, cfg: {"CurBucketName": "b", "ProfileArn": "p"})
+    cur = pd.DataFrame({
+        verify.COL_USAGE_START: pd.to_datetime(["2026-10-21T15:00:00Z"], utc=True),
+        verify.COL_COST: [0.01], verify.COL_TAGS: [{"iamPrincipal/team": "search"}],
+        verify.COL_PRINCIPAL: ["arn:aws:sts::ACCOUNT:assumed-role/x/y"], verify.COL_RESOURCE: ["r"],
+    })
+    monkeypatch.setattr(verify, "load_cur", lambda sess, cfg, outputs: cur)
+
+
+class Args:
+    day = None
+
+
+def test_day_window_is_start_inclusive_end_exclusive():
+    assert verify.day_window(DAY0) == (date(2026, 10, 21), date(2026, 10, 22))
+    req = verify.ce_request(*verify.day_window(DAY0), verify.service_filter(["Amazon Bedrock"]), None)
+    assert req["TimePeriod"] == {"Start": "2026-10-21", "End": "2026-10-22"}
+
+
+def test_logs_window_covers_the_whole_utc_day():
+    start, end = verify.logs_window(DAY0)
+    assert verify.datetime.fromtimestamp(start, verify.UTC).isoformat() == "2026-10-21T00:00:00+00:00"
+    assert verify.datetime.fromtimestamp(end, verify.UTC).isoformat() == "2026-10-21T23:59:59+00:00"
+
+
+@pytest.mark.parametrize("test_name", ["t2", "t4", "t5"])
+def test_single_day_subcommands_send_one_day_windows(cfg, offline, test_name):
+    cfg["pricing"].update(inputPer1M=0.07, outputPer1M=0.30)  # t4 refuses to run without prices
+    ce, logs = FakeCE(), FakeLogs()
+    getattr(verify, test_name)(cfg, FakeSession(ce, logs), Args())
+    # The cost query reads exactly the pre-activation day...
+    assert [c["TimePeriod"] for c in ce.cost_calls] == [{"Start": "2026-10-21", "End": "2026-10-22"}]
+    # ...while the service name is looked up from the first lab call through tomorrow.
+    assert ce.dimension_calls[0]["TimePeriod"] == {"Start": "2026-10-21", "End": "2026-10-24"}
+    if test_name == "t4":
+        assert (logs.started[0]["startTime"], logs.started[0]["endTime"]) == verify.logs_window(DAY0)
+
+
+@pytest.mark.parametrize("test_name", ["t1", "t3"])
+def test_range_subcommands_read_through_today(cfg, offline, test_name):
+    ce = FakeCE()
+    getattr(verify, test_name)(cfg, FakeSession(ce), Args())
+    assert ce.cost_calls[0]["TimePeriod"] == {"Start": "2026-10-21", "End": "2026-10-24"}
+
+
+def test_t5_keeps_going_when_cost_explorer_has_no_bedrock_service(cfg, offline):
+    ce = FakeCE(services=())
+    record = verify.t5(cfg, FakeSession(ce), Args())
+    assert record["costExplorer"] == [] and record["costExplorerNote"] == verify.NO_SERVICE_NOTE
+    assert ce.cost_calls == []
+    assert record["curHourly"][0]["team"] == "search"  # the CUR half still ran
+
+
+def test_empty_grouped_day_is_reported_as_no_data_not_zero(cfg, offline):
+    record = verify.t5(cfg, FakeSession(FakeCE()), Args())
+    assert record["costExplorer"] == [{"date": "2026-10-21", "group": verify.NO_DATA, "amount": 0.0, "unit": ""}]

@@ -119,18 +119,53 @@ def tag_filter(key: str, values: list[str]) -> dict[str, Any]:
     return {"Tags": {"Key": key, "Values": values, "MatchOptions": ["EQUALS"]}}
 
 
+def day_window(day: date) -> tuple[date, date]:
+    """One UTC day for Cost Explorer: Start is inclusive, End is exclusive (the next day)."""
+    return day, day + timedelta(days=1)
+
+
+def logs_window(day: date) -> tuple[int, int]:
+    """One UTC day for Logs Insights, in epoch seconds: 00:00:00 to 23:59:59 (both ends inclusive)."""
+    start = datetime(day.year, day.month, day.day, tzinfo=UTC)
+    return int(start.timestamp()), int((start + timedelta(days=1)).timestamp()) - 1
+
+
+def discovery_window(start: date) -> tuple[date, date]:
+    """Where to look up the Bedrock SERVICE name: from the lab's first call (or start, if earlier) to tomorrow.
+
+    The name doesn't depend on the day being read, so a day that Cost Explorer returns no data for
+    (seen for the account's first day in our run, while CUR had that day's cost) must not hide it.
+    """
+    first = first_day_of_mode() or start
+    return min(first, start), utc_now().date() + timedelta(days=1)
+
+
 def bedrock_services(ce, start: date, end: date) -> list[str]:
-    """Discovers the Bedrock SERVICE dimension value(s) instead of hard-coding them."""
+    """Discovers the Bedrock SERVICE dimension value(s) instead of hard-coding them. May be empty."""
     resp = ce.get_dimension_values(
         TimePeriod={"Start": start.isoformat(), "End": end.isoformat()},
         Dimension="SERVICE",
         SearchString="Bedrock",
     )
-    values = [v["Value"] for v in resp.get("DimensionValues", [])]
-    if not values:
-        raise SystemExit("Cost Explorer lists no SERVICE value matching 'Bedrock' for this period yet "
-                         "(cost data can take up to 24 hours).")
-    return values
+    return [v["Value"] for v in resp.get("DimensionValues", [])]
+
+
+NO_SERVICE_NOTE = ("Cost Explorer lists no SERVICE value matching 'Bedrock' since the first lab call "
+                   "(cost data can take up to 24 hours) — Cost Explorer part skipped; CUR part still runs.")
+
+
+def bedrock_cost(ce, start: date, end: date, group_key: str | None,
+                 extra_filter: dict[str, Any] | None = None) -> tuple[list[str], list[dict[str, Any]], str | None]:
+    """Bedrock cost from Start (inclusive) to End (exclusive). Returns (services, rows, note)."""
+    services = bedrock_services(ce, *discovery_window(start))
+    if not services:
+        out(NO_SERVICE_NOTE)
+        return [], [], NO_SERVICE_NOTE
+    flt = service_filter(services) if extra_filter is None else {"And": [service_filter(services), extra_filter]}
+    return services, ce_rows(ce, ce_request(start, end, flt, group_key)), None
+
+
+NO_DATA = "(no data returned)"
 
 
 def ce_rows(ce, req: dict[str, Any]) -> list[dict[str, Any]]:
@@ -144,6 +179,10 @@ def ce_rows(ce, req: dict[str, Any]) -> list[dict[str, Any]]:
                     m = g["Metrics"]["UnblendedCost"]
                     rows.append({"date": day, "group": "|".join(g["Keys"]), "amount": float(m["Amount"]),
                                  "unit": m["Unit"]})
+            elif "GroupBy" in req:
+                # A grouped query with no groups means Cost Explorer returned nothing for that day,
+                # which is not the same as a cost of $0 — say so instead of printing a total.
+                rows.append({"date": day, "group": NO_DATA, "amount": 0.0, "unit": ""})
             else:
                 m = period["Total"].get("UnblendedCost", {"Amount": "0", "Unit": "USD"})
                 rows.append({"date": day, "group": "(total)", "amount": float(m["Amount"]), "unit": m["Unit"]})
@@ -243,7 +282,11 @@ def t0(cfg, sess, args) -> dict[str, Any]:
         try:
             stacks[name] = cfn.describe_stacks(StackName=name)["Stacks"][0]["StackStatus"]
         except Exception as exc:
-            stacks[name] = f"not found ({error_code(exc)})"
+            missing = error_code(exc) == "ValidationError"  # DescribeStacks on a stack that doesn't exist
+            if missing and name == cfg["stackNames"]["curExport"]:
+                stacks[name] = "not deployed yet (deployed on day 1)"
+            else:
+                stacks[name] = f"not found ({error_code(exc)})"
     logging_cfg = sess.client("bedrock").get_model_invocation_logging_configuration().get("loggingConfig")
     smoke = read_json(RESULTS_DIR / "smoke.json")
     if not smoke:
@@ -282,8 +325,7 @@ def t1(cfg, sess, args) -> dict[str, Any]:
     start = pick_day(args.day, first_day_of_mode())
     end = utc_now().date() + timedelta(days=1)
     team_key = listed_key(cfg, "team", act)
-    services = bedrock_services(ce, start, end)
-    rows = ce_rows(ce, ce_request(start, end, service_filter(services), team_key))
+    services, rows, note = bedrock_cost(ce, start, end, team_key)
     first_seen: dict[str, str] = {}
     for r in rows:
         if r["amount"] > 0 and r["group"] not in first_seen:
@@ -297,7 +339,8 @@ def t1(cfg, sess, args) -> dict[str, Any]:
     table([{**r, "amount": money(r["amount"])} for r in rows if r["amount"] > 0], ["date", "group", "amount", "unit"])
     out(f"Hours since activation at this check: {hours}")
     return {"teamKey": team_key, "services": services, "activatedAt": utc_iso(act_at) if act_at else None,
-            "checkedAt": utc_iso(now), "hoursSinceActivation": hours, "firstSeen": first_seen, "rows": rows}
+            "checkedAt": utc_iso(now), "hoursSinceActivation": hours, "firstSeen": first_seen, "rows": rows,
+            "costExplorerNote": note}
 
 
 def t2(cfg, sess, args) -> dict[str, Any]:
@@ -305,9 +348,8 @@ def t2(cfg, sess, args) -> dict[str, Any]:
     act = activation()
     day = pick_day(args.day, first_day_of_mode("gateway-shared"))
     team_key, path_key = listed_key(cfg, "team", act), listed_key(cfg, "path", act)
-    services = bedrock_services(ce, day, day + timedelta(days=1))
-    flt = {"And": [service_filter(services), tag_filter(path_key, [cfg["gateway"]["roleTag"]["path"]])]}
-    ce_result = ce_rows(ce, ce_request(day, day + timedelta(days=1), flt, team_key))
+    path_filter = tag_filter(path_key, [cfg["gateway"]["roleTag"]["path"]])
+    _, ce_result, note = bedrock_cost(ce, *day_window(day), team_key, path_filter)
     out(CE_NOTE)
     out(f"Cost Explorer {day}: grouped by {team_key!r}, filtered {path_key}={cfg['gateway']['roleTag']['path']!r}")
     table([{**r, "amount": money(r["amount"])} for r in ce_result], ["date", "group", "amount", "unit"])
@@ -319,7 +361,7 @@ def t2(cfg, sess, args) -> dict[str, Any]:
     out(f"CUR 2.0 Bedrock rows on {day}, by {COL_PRINCIPAL} and IAM-principal tags:")
     table(cur_rows)
     return {"day": day.isoformat(), "teamKey": team_key, "pathKey": path_key, "costExplorer": ce_result,
-            "cur": cur_rows}
+            "costExplorerNote": note, "cur": cur_rows}
 
 
 def t3(cfg, sess, args) -> dict[str, Any]:
@@ -328,8 +370,7 @@ def t3(cfg, sess, args) -> dict[str, Any]:
     start = pick_day(args.day, first_day_of_mode())
     end = utc_now().date() + timedelta(days=1)
     app_key = listed_key(cfg, "app", act)
-    services = bedrock_services(ce, start, end)
-    ce_result = ce_rows(ce, ce_request(start, end, service_filter(services), app_key))
+    _, ce_result, note = bedrock_cost(ce, start, end, app_key)
     out(CE_NOTE)
     out(f"Cost Explorer grouped by {app_key!r}:")
     table([{**r, "amount": money(r["amount"])} for r in ce_result if r["amount"] > 0],
@@ -348,7 +389,8 @@ def t3(cfg, sess, args) -> dict[str, Any]:
                 for k, v in (cc.get("results") or {}).items()]
     out("Chat Completions (from `python -m traffic check-chat-completions`):")
     table(statuses)
-    return {"appKey": app_key, "costExplorer": ce_result, "curProfileRows": cur_rows, "chatCompletions": statuses}
+    return {"appKey": app_key, "costExplorer": ce_result, "costExplorerNote": note, "curProfileRows": cur_rows,
+            "chatCompletions": statuses}
 
 
 def t4(cfg, sess, args) -> dict[str, Any]:
@@ -357,11 +399,11 @@ def t4(cfg, sess, args) -> dict[str, Any]:
         raise SystemExit("config.pricing.inputPer1M / outputPer1M are null — enter the us-east-1 rates from "
                          f"{cfg['pricing']['source']} (with readOn) before running t4.")
     day = pick_day(args.day, last_day_of_mode("direct"))
-    start = datetime(day.year, day.month, day.day, tzinfo=UTC)
+    start_s, end_s = logs_window(day)
     query = lab_query(cfg)
     logs = sess.client("logs")
-    qid = logs.start_query(logGroupName=cfg["logGroupName"], startTime=int(start.timestamp()),
-                           endTime=int((start + timedelta(days=1)).timestamp()) - 1, queryString=query)["queryId"]
+    qid = logs.start_query(logGroupName=cfg["logGroupName"], startTime=start_s, endTime=end_s,
+                           queryString=query)["queryId"]
     while True:
         res = logs.get_query_results(queryId=qid)
         if res["status"] in ("Complete", "Failed", "Cancelled", "Timeout"):
@@ -375,8 +417,7 @@ def t4(cfg, sess, args) -> dict[str, Any]:
     estimate = total_in / 1e6 * float(price_in) + total_out / 1e6 * float(price_out)
 
     ce = sess.client("ce")
-    services = bedrock_services(ce, day, day + timedelta(days=1))
-    billed_rows = ce_rows(ce, ce_request(day, day + timedelta(days=1), service_filter(services), None))
+    _, billed_rows, note = bedrock_cost(ce, *day_window(day), None)
     billed = sum(r["amount"] for r in billed_rows)
     diff = estimate - billed
     pct = (diff / billed * 100) if billed else None
@@ -388,7 +429,7 @@ def t4(cfg, sess, args) -> dict[str, Any]:
             "differencePct": f"{pct:.2f}" if pct is not None else "n/a (billed is 0)"}])
     return {"day": day.isoformat(), "pricing": cfg["pricing"], "logsInsights": rows, "totalInputTokens": total_in,
             "totalOutputTokens": total_out, "estimateUsd": estimate, "billedUsd": billed,
-            "differenceUsd": diff, "differencePct": pct}
+            "differenceUsd": diff, "differencePct": pct, "costExplorerNote": note}
 
 
 def t5(cfg, sess, args) -> dict[str, Any]:
@@ -397,8 +438,7 @@ def t5(cfg, sess, args) -> dict[str, Any]:
     act_at = activation_time(act)
     day = pick_day(args.day, first_day_of_mode())
     team_key = listed_key(cfg, "team", act)
-    services = bedrock_services(ce, day, day + timedelta(days=1))
-    ce_result = ce_rows(ce, ce_request(day, day + timedelta(days=1), service_filter(services), team_key))
+    _, ce_result, note = bedrock_cost(ce, *day_window(day), team_key)
     out(CE_NOTE)
     out(f"Cost Explorer {day} grouped by {team_key!r} — raw group keys as returned (including the no-value group):")
     table([{**r, "amount": money(r["amount"])} for r in ce_result], ["date", "group", "amount", "unit"])
@@ -416,7 +456,7 @@ def t5(cfg, sess, args) -> dict[str, Any]:
     out(f"CUR 2.0 hourly Bedrock rows vs activation ({utc_iso(act_at) if act_at else 'not recorded'}):")
     table(cur_rows)
     return {"day": day.isoformat(), "teamKey": team_key, "activatedAt": utc_iso(act_at) if act_at else None,
-            "costExplorer": ce_result, "curHourly": cur_rows}
+            "costExplorer": ce_result, "costExplorerNote": note, "curHourly": cur_rows}
 
 
 def t6(cfg, sess, args) -> dict[str, Any]:
